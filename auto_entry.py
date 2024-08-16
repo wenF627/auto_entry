@@ -10,15 +10,25 @@ import os
 
 
 # 从API获取Excel文件和文件名
+import re
+
+
 def get_excel_and_filename(api_url):
     response = requests.get(api_url)
     if response.status_code == 200:
         data = response.json()
         excel_content = requests.get(data['excel_url']).content
-        excel_filename = data['filename']
+        original_filename = data['filename']
+
+        # 使用正则表达式提取所需的部分
+        match = re.search(r'Descartes_(\d+-\d+)_\d{4}-\d{2}-\d{2}\.xlsx', original_filename)
+        if match:
+            excel_filename = match.group(1)  # 提取 "784-08441064" 这种格式
+        else:
+            raise ValueError("Filename format is not as expected")
 
         # 保存Excel文件
-        file_path = os.path.join(os.getcwd(), excel_filename)
+        file_path = os.path.join(os.getcwd(), original_filename)
         with open(file_path, 'wb') as f:
             f.write(excel_content)
 
@@ -68,7 +78,7 @@ def transmit_ams_acas(driver):
         return {"message": "error: already done AMS filling", "screenshot": "error_ams_already_done.png"}
     select.select_by_value("add")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit'][value='Transmit']").click()
-    WebDriverWait(driver, 60).until(
+    WebDriverWait(driver, 300).until(
         EC.presence_of_element_located((By.ID, "transmitButton"))
     )
     driver.find_element(By.ID, "overlayCloseLnkId").click()
@@ -77,21 +87,36 @@ def transmit_ams_acas(driver):
 
 # 检查反馈
 def check_responses(driver):
+    print("点击 'Check for Responses' 按钮...")
     driver.find_element(By.ID, "responseButton").click()
-    WebDriverWait(driver, 60).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "div img[src='/static/roundErrorBullet.gif']"))
-    )
+
+    try:
+        print("等待页面元素加载...")
+        WebDriverWait(driver, 600).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div img[src='/static/roundErrorBullet.gif']"))
+        )
+        print("元素已加载，继续执行...")
+    except TimeoutException as e:
+        print("元素加载超时，可能页面未正确加载。")
+        driver.save_screenshot("timeout_error_screenshot.png")
+        return {"message": "error: element not found", "screenshot": "timeout_error_screenshot.png"}
+
     h_rej = driver.find_element(By.ID, "hRej").text
     a_rej = driver.find_element(By.ID, "aRej").text
+
     if h_rej != "0" or a_rej != "0":
         driver.save_screenshot("error_screenshot.png")
         return {"message": "error", "screenshot": "error_screenshot.png"}
+
     driver.refresh()
+
     ams_status = driver.find_element(By.ID, "amsStatusCell").text
     acas_status = driver.find_element(By.ID, "acasStatusCell").text
+
     if ams_status == "Accepted" and acas_status == "Accepted":
         driver.save_screenshot("success_screenshot.png")
         return {"message": "ams_success", "screenshot": "success_screenshot.png"}
+
     return {"message": "error", "screenshot": None}
 
 
@@ -126,7 +151,7 @@ def create_type_86_entry(driver):
         WebDriverWait(driver, 30).until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, ".progressBarClass"))
         )
-        success_message = WebDriverWait(driver, 120).until(
+        success_message = WebDriverWait(driver, 600).until(
             EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'entries were created')]"))
         )
         driver.save_screenshot("success_message_screenshot.png")
@@ -144,8 +169,12 @@ def return_results_to_api(api_url, results):
 
 
 def main():
-    api_url = "https://example.com/api/get_excel"  # 替换为获取Excel的API URL
-    return_api_url = "https://example.com/api/return_results"  # 替换为返回结果的API URL
+    # api_url = "https://example.com/api/get_excel"  # 替换为获取Excel的API URL
+    # return_api_url = "https://example.com/api/return_results"  # 替换为返回结果的API URL
+    api_url = "http://localhost:5000/api/get_excel"  # 指向本地伪API
+    return_api_url = "http://localhost:5000/api/return_results"  # 返回结果的API URL
+
+    driver = webdriver.Chrome()
 
     driver = webdriver.Chrome()
     driver.maximize_window()
@@ -179,3 +208,27 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# def main():
+#     api_url = "http://localhost:5000/api/get_excel"  # 指向本地伪API
+#     return_api_url = "http://localhost:5000/api/return_results"  # 返回结果的API URL
+#
+#     driver = webdriver.Chrome()
+#     driver.maximize_window()
+#
+#     try:
+#         # 假设上传和传输部分已经完成并通过测试
+#         # 直接跳转到指定的URL以测试创建条目
+#         login(driver)
+#         driver.get("https://www.netchb.com/app/ams/mawbMenu.do?amsMawbId=489569")
+#
+#         # 测试创建条目部分
+#         result_create = create_type_86_entry(driver)
+#         return_results_to_api(return_api_url, result_create)
+#         print(result_create['message'])
+#
+#     finally:
+#         driver.quit()
+#
+# if __name__ == "__main__":
+#     main()
