@@ -14,12 +14,17 @@ import time
 
 
 # Function to create a new directory for each excel_filename
-def create_directory_for_excel(excel_filename):
+def create_directory_for_excel(excel_filename, driver):
     dir_path = os.path.join(os.getcwd(), excel_filename)
-    if not os.path.exists(dir_path):
+    if os.path.exists(dir_path):
+        # If directory exists, take a screenshot and return an error message
+        screenshot_path = os.path.join(os.getcwd(), f"{excel_filename}_directory_exists.png")
+        driver.save_screenshot(screenshot_path)
+        return {"message": "error: Already been pushed before", "screenshot": screenshot_path}
+    else:
+        # Create directory if it does not exist
         os.makedirs(dir_path)
-    return dir_path
-
+        return {"message": "success", "dir_path": dir_path}
 
 # Function to save screenshot in the created directory
 def save_screenshot(driver, screenshot_name, dir_path):
@@ -27,6 +32,25 @@ def save_screenshot(driver, screenshot_name, dir_path):
     driver.save_screenshot(screenshot_path)
     return screenshot_path
 
+def get_actual_download_url(file_url):
+    """
+    This function constructs the API URL to retrieve the actual download URL for the file.
+    """
+    preview_api_base_url = "http://139.224.207.21:8083/adminapi/s3file/preview"
+    full_api_url = f"{preview_api_base_url}?fileName={file_url}"
+
+    response = requests.post(full_api_url)
+
+    if response.status_code == 200:
+        response_data = response.json()
+        if response_data.get("status") and response_data.get("code") == 200:
+            return response_data.get("data")  # Get the actual download URL from 'data' field
+        else:
+            print(f"Error in response: {response_data.get('message')}")
+    else:
+        print(f"Failed to get download URL for {file_url}: {response.text}")
+
+    return None
 
 # Function to get data from the API
 def get_data_from_api(api_url):
@@ -86,6 +110,11 @@ def upload_excel(driver, file_path):
 
 
 # 等待并点击上传后的链接
+# def wait_for_upload_and_click_link(driver, partial_filename):
+#     upload_link = WebDriverWait(driver, 600).until(
+#         EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, partial_filename))
+#     )
+#     upload_link.click()
 def wait_for_upload_and_click_link(driver, partial_filename, dir_path):
     try:
         # Initialize WebDriverWait
@@ -123,6 +152,38 @@ def wait_for_upload_and_click_link(driver, partial_filename, dir_path):
         screenshot_path = save_screenshot(driver, "upload_link_timeout_error.png", dir_path)
         return {"message": "error: timeout waiting for upload link or error message", "screenshot": screenshot_path}
 
+# 921 edit
+# Function to edit MAWB if excel_filename starts with "921"
+def edit_mawb_if_needed(driver, excel_filename, dir_path):
+    if excel_filename.startswith("921"):
+        try:
+            # Navigate to the "Edit MAWB" page
+            edit_mawb_link = driver.find_element(By.XPATH, f"//a[contains(@href, '/app/ams/editMawb.do?amsMawbId=')]")
+            edit_mawb_link.click()
+
+            # Clear the input fields for "importingCarrier" and "flightNo"
+            importing_carrier_input = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.ID, "impC"))
+            )
+            importing_carrier_input.clear()
+
+            flight_no_input = driver.find_element(By.ID, "fln")
+            flight_no_input.clear()
+
+            # Click the "Save Changes" button
+            save_changes_button = driver.find_element(By.CSS_SELECTOR, "input[type='submit'][value='Save Changes']")
+            save_changes_button.click()
+
+            print("MAWB edited successfully.")
+
+        except Exception as e:
+            # Handle exceptions such as missing elements or timeout
+            screenshot_path = save_screenshot(driver, "edit_mawb_error_screenshot.png", dir_path)
+            print(f"Error while editing MAWB: {e}")
+            return {"message": "error: failed to edit MAWB", "screenshot": screenshot_path}
+
+    # Return success if no edit was needed or editing was successful
+    return {"message": "success", "screenshot": None}
 
 # 传输AMS/ACAS
 def transmit_ams_acas(driver, dir_path):
@@ -287,35 +348,51 @@ def check_admissible(excel_filename, dir_path):
 
 
 # Function to handle browser automation with Selenium
-def perform_browser_operations(excel_filename, file_path, dir_path):
+def perform_browser_operations(excel_filename, file_path):
     driver = webdriver.Chrome()
     driver.maximize_window()
 
-    login(driver)
-    navigate_to_upload_page(driver)
-    upload_excel(driver, file_path)
-    result_upload = wait_for_upload_and_click_link(driver, excel_filename, dir_path)
-    if result_upload['message'].startswith("error"):
+    try:
+        # Check if the directory for the excel file already exists
+        result = create_directory_for_excel(excel_filename, driver)
+        if result['message'] == 'error: Already been pushed before':
+            print(f"Error: {result['message']}, Screenshot saved at: {result['screenshot']}")
+            return result  # Return early if directory already exists
+
+        # If directory is created successfully, continue with further operations
+        dir_path = result['dir_path']
+
+        login(driver)
+        navigate_to_upload_page(driver)
+        upload_excel(driver, file_path)
+
+        result_upload = wait_for_upload_and_click_link(driver, excel_filename, dir_path)
+        if result_upload['message'].startswith("error"):
+            return result_upload
+
+        result_edit = edit_mawb_if_needed(driver, excel_filename, dir_path)
+        if result_edit['message'].startswith("error"):
+            return result_edit
+
+        result_ams = transmit_ams_acas(driver, dir_path)
+        if result_ams['message'].startswith("error"):
+            return result_ams
+
+        result_responses = check_responses(driver, dir_path)
+        if result_responses['message'].startswith("error"):
+            return result_responses
+
+        result_create = create_type_86_entry(driver, dir_path)
+        if result_create['message'].startswith("error"):
+            return result_create
+
+        return {"message": "success", "screenshot": None}
+
+    finally:
+        # Ensure driver is always quit after operations
         driver.quit()
-        return result_upload
-
-    result_ams = transmit_ams_acas(driver, dir_path)
-    if result_ams['message'].startswith("error"):
-        driver.quit()
-        return result_ams
-
-    result_responses = check_responses(driver, dir_path)
-    if result_responses['message'].startswith("error"):
-        driver.quit()
-        return result_responses
-
-    result_create = create_type_86_entry(driver, dir_path)
-    if result_create['message'].startswith("error"):
-        driver.quit()
-        return result_create
 
 
-# Function to upload screenshot to S3 via API
 def upload_screenshot_to_s3(file_path):
     # Read the screenshot file and encode it in Base64
     with open(file_path, 'rb') as file:
@@ -344,7 +421,7 @@ def upload_screenshot_to_s3(file_path):
     }
 
     # Send POST request to the S3 upload API
-    url = "http://139.224.207.21:8083/adminapi/s3file/uploadByAppkey"
+    url = "https://admin.tolead.com/adminapi/s3file/uploadByAppkey"
     response = requests.post(url, json=payload)
 
     # Handle response
@@ -390,12 +467,12 @@ def return_results_to_api(api_url, record_id, excel_filename, result_message, sc
 def periodic_check(previous_checklist, processed_set, return_api_url):
     while True:
         current_time = datetime.now()
-        if current_time.minute == 6:  # Execute at the specified minute
+        if current_time.minute == 0:  # Execute at the specified minute
             print("Checking the previous hour's checklist...")
             for _ in range(len(previous_checklist)):
                 excel_filename = previous_checklist.pop(0)
                 print(excel_filename)
-                dir_path = create_directory_for_excel(excel_filename)
+                dir_path = os.path.join(os.getcwd(), excel_filename)
                 result = check_admissible(excel_filename, dir_path)
                 return_results_to_api(return_api_url, None, excel_filename, result['message'],
                                       result['screenshot'])
@@ -403,6 +480,7 @@ def periodic_check(previous_checklist, processed_set, return_api_url):
         time.sleep(60)  # Check every minute
 
 
+# Main process
 def main_process(current_checklist, processed_set, api_url, return_api_url):
     while True:
         # Get data list from the API
@@ -424,8 +502,8 @@ def main_process(current_checklist, processed_set, api_url, return_api_url):
                         try:
                             print(f"Processing data for MAWB No: {excel_filename}...")
                             file_path = download_excel(actual_download_url, excel_filename)
-                            dir_path = create_directory_for_excel(excel_filename)
-                            result = perform_browser_operations(excel_filename, file_path, dir_path)
+                            # dir_path = create_directory_for_excel(excel_filename)
+                            result = perform_browser_operations(excel_filename, file_path)
                             processed_set.add(excel_filename)
                             return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
                                                   result['screenshot'])
@@ -440,26 +518,6 @@ def main_process(current_checklist, processed_set, api_url, return_api_url):
             print("Sleeping for 30 minutes...")
             time.sleep(1800)  # 30 minutes sleep
 
-
-def get_actual_download_url(file_url):
-    """
-    This function constructs the API URL to retrieve the actual download URL for the file.
-    """
-    preview_api_base_url = "http://139.224.207.21:8083/adminapi/s3file/preview"
-    full_api_url = f"{preview_api_base_url}?fileName={file_url}"
-
-    response = requests.post(full_api_url)
-
-    if response.status_code == 200:
-        response_data = response.json()
-        if response_data.get("status") and response_data.get("code") == 200:
-            return response_data.get("data")  # Get the actual download URL from 'data' field
-        else:
-            print(f"Error in response: {response_data.get('message')}")
-    else:
-        print(f"Failed to get download URL for {file_url}: {response.text}")
-
-    return None
 
 # Main function to run both tasks concurrently and manage checklist switching
 def main():
