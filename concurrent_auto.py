@@ -34,17 +34,26 @@ def get_data_from_api(api_url):
     if response.status_code == 200:
         data = response.json()
         if data['status'] and data['data']:
-            record = data['data'][0]
-            file_url = record['fileUrl']
-            excel_filename = record['mawbNo']
-            record_id = record['id']
-            return file_url, excel_filename, record_id
+            records = data['data']  # Get the list of records
+            data_list = []
+
+            for record in records:
+                file_url = record['fileUrl']
+                excel_filename = record['mawbNo']
+                record_id = record['id']
+                data_list.append({
+                    'file_url': file_url,
+                    'excel_filename': excel_filename,
+                    'record_id': record_id
+                })
+
+            return data_list
         else:
             print("No data available.")
-            return None, None, None
+            return []  # Return an empty list when no data is available
     else:
         print("Failed to retrieve data from API.")
-        return None, None, None
+        return []  # Return an empty list if the request failed
 
 
 # Function to download Excel file
@@ -77,11 +86,42 @@ def upload_excel(driver, file_path):
 
 
 # 等待并点击上传后的链接
-def wait_for_upload_and_click_link(driver, partial_filename):
-    upload_link = WebDriverWait(driver, 600).until(
-        EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, partial_filename))
-    )
-    upload_link.click()
+def wait_for_upload_and_click_link(driver, partial_filename, dir_path):
+    try:
+        # Initialize WebDriverWait
+        wait = WebDriverWait(driver, 600)  # Set timeout duration
+
+        while True:
+            # Check if the error message is present
+            error_divs = driver.find_elements(By.XPATH, "//div[img[@src='/static/roundErrorBullet.gif']]")
+            if error_divs:
+                error_message = error_divs[0].text.strip()
+                if "The data could not be uploaded" in error_message:
+                    # Take a screenshot and return an error message if the specific error message is found
+                    screenshot_path = save_screenshot(driver, "upload_error_screenshot.png", dir_path)
+                    return {"message": f"error: {error_message}", "screenshot": screenshot_path}
+            else:
+                # Check if the upload link is present
+                try:
+                    upload_link = wait.until(
+                        EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, partial_filename))
+                    )
+                    if upload_link:
+                        # Click the upload link if no error is found
+                        upload_link.click()
+                        return {"message": "success", "screenshot": None}
+
+                except TimeoutException:
+                    # If the upload link is not found within the specified wait time, continue the loop to check again
+                    continue
+
+            # Brief sleep to prevent busy-waiting and to give time for the page to update
+            time.sleep(1)
+
+    except TimeoutException:
+        # Handle timeout exception if the upload link or error message does not appear in the specified time
+        screenshot_path = save_screenshot(driver, "upload_link_timeout_error.png", dir_path)
+        return {"message": "error: timeout waiting for upload link or error message", "screenshot": screenshot_path}
 
 
 # 传输AMS/ACAS
@@ -254,7 +294,10 @@ def perform_browser_operations(excel_filename, file_path, dir_path):
     login(driver)
     navigate_to_upload_page(driver)
     upload_excel(driver, file_path)
-    wait_for_upload_and_click_link(driver, excel_filename)
+    result_upload = wait_for_upload_and_click_link(driver, excel_filename, dir_path)
+    if result_upload['message'].startswith("error"):
+        driver.quit()
+        return result_upload
 
     result_ams = transmit_ams_acas(driver, dir_path)
     if result_ams['message'].startswith("error"):
@@ -334,7 +377,7 @@ def return_results_to_api(api_url, record_id, excel_filename, result_message, sc
     }
 
     response = requests.post(api_url, json=data)
-
+    print(data)
     if response.status_code == 200:
         print("Results sent successfully!")
         return True
@@ -347,7 +390,7 @@ def return_results_to_api(api_url, record_id, excel_filename, result_message, sc
 def periodic_check(previous_checklist, processed_set, return_api_url):
     while True:
         current_time = datetime.now()
-        if current_time.minute == 0:  # Execute at the specified minute
+        if current_time.minute == 6:  # Execute at the specified minute
             print("Checking the previous hour's checklist...")
             for _ in range(len(previous_checklist)):
                 excel_filename = previous_checklist.pop(0)
@@ -360,31 +403,63 @@ def periodic_check(previous_checklist, processed_set, return_api_url):
         time.sleep(60)  # Check every minute
 
 
-# Main process
 def main_process(current_checklist, processed_set, api_url, return_api_url):
     while True:
-        file_url, excel_filename, record_id = get_data_from_api(api_url)
-        print(f"Data retrieved for MAWB No: {excel_filename}. Processing...")
-        if file_url and excel_filename and record_id:
-            if excel_filename not in processed_set:
-                try:
-                    print(f"Data retrieved for MAWB No: {excel_filename}. Processing...")
-                    file_path = download_excel(file_url, excel_filename)
-                    dir_path = create_directory_for_excel(excel_filename)
-                    result = perform_browser_operations(excel_filename, file_path, dir_path)
-                    processed_set.add(excel_filename)
-                    return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
-                                          result['screenshot'])
-                    if not result['message'].startswith("error"):
-                        current_checklist.append(excel_filename)
-                except Exception as e:
-                    print(f"An error occurred: {e}")
+        # Get data list from the API
+        data_list = get_data_from_api(api_url)
+        print(data_list)
 
+        if data_list:
+            for data in data_list:
+                file_url, excel_filename, record_id = data['file_url'], data['excel_filename'], data['record_id']
+                print(f"Data retrieved for MAWB No: {excel_filename}. Processing...")
+                print(file_url, excel_filename, record_id)
+
+                if file_url and excel_filename and record_id:
+                    # Get actual download URL using file_url as randomName
+                    actual_download_url = get_actual_download_url(file_url)
+                    print(actual_download_url, excel_filename, record_id)
+
+                    if actual_download_url and excel_filename not in processed_set:
+                        try:
+                            print(f"Processing data for MAWB No: {excel_filename}...")
+                            file_path = download_excel(actual_download_url, excel_filename)
+                            dir_path = create_directory_for_excel(excel_filename)
+                            result = perform_browser_operations(excel_filename, file_path, dir_path)
+                            processed_set.add(excel_filename)
+                            return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
+                                                  result['screenshot'])
+                            if not result['message'].startswith("error"):
+                                current_checklist.append(excel_filename)
+                        except Exception as e:
+                            print(f"An error occurred: {e}")
+                else:
+                    print("Invalid data. Skipping this record.")
         else:
             print("No data to process.")
             print("Sleeping for 30 minutes...")
             time.sleep(1800)  # 30 minutes sleep
 
+
+def get_actual_download_url(file_url):
+    """
+    This function constructs the API URL to retrieve the actual download URL for the file.
+    """
+    preview_api_base_url = "http://139.224.207.21:8083/adminapi/s3file/preview"
+    full_api_url = f"{preview_api_base_url}?fileName={file_url}"
+
+    response = requests.post(full_api_url)
+
+    if response.status_code == 200:
+        response_data = response.json()
+        if response_data.get("status") and response_data.get("code") == 200:
+            return response_data.get("data")  # Get the actual download URL from 'data' field
+        else:
+            print(f"Error in response: {response_data.get('message')}")
+    else:
+        print(f"Failed to get download URL for {file_url}: {response.text}")
+
+    return None
 
 # Main function to run both tasks concurrently and manage checklist switching
 def main():
