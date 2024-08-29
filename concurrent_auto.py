@@ -11,16 +11,18 @@ import os
 import base64
 import hashlib
 import time
+from threading import Lock
 
 
 # Function to create a new directory for each excel_filename
 def create_directory_for_excel(excel_filename, driver):
     dir_path = os.path.join(os.getcwd(), excel_filename)
+    print(dir_path)
     if os.path.exists(dir_path):
         # If directory exists, take a screenshot and return an error message
         screenshot_path = os.path.join(os.getcwd(), f"{excel_filename}_directory_exists.png")
         driver.save_screenshot(screenshot_path)
-        return {"message": "error: Already been pushed before", "screenshot": screenshot_path}
+        return {"message": "error: Already been pushed before", "screenshot": screenshot_path, "dir_path": dir_path}
     else:
         # Create directory if it does not exist
         os.makedirs(dir_path)
@@ -36,7 +38,7 @@ def get_actual_download_url(file_url):
     """
     This function constructs the API URL to retrieve the actual download URL for the file.
     """
-    preview_api_base_url = "http://139.224.207.21:8083/adminapi/s3file/preview"
+    preview_api_base_url = "https://admin.tolead.com/adminapi/s3file/preview"
     full_api_url = f"{preview_api_base_url}?fileName={file_url}"
 
     response = requests.post(full_api_url)
@@ -108,13 +110,6 @@ def upload_excel(driver, file_path):
     driver.find_element(By.ID, "fl").send_keys(file_path)
     driver.find_element(By.ID, "tHU").click()
 
-
-# 等待并点击上传后的链接
-# def wait_for_upload_and_click_link(driver, partial_filename):
-#     upload_link = WebDriverWait(driver, 600).until(
-#         EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, partial_filename))
-#     )
-#     upload_link.click()
 def wait_for_upload_and_click_link(driver, partial_filename, dir_path):
     try:
         # Initialize WebDriverWait
@@ -278,7 +273,7 @@ def create_type_86_entry(driver, dir_path):
                 "screenshot": screenshot_path}
 
 
-def check_admissible(excel_filename, dir_path):
+def check_admissible(excel_filename, dir_path, processed_set):
     driver = webdriver.Chrome()
     login(driver)
     driver.find_element(By.ID, "amsLink").click()
@@ -291,16 +286,20 @@ def check_admissible(excel_filename, dir_path):
             EC.presence_of_all_elements_located((By.CSS_SELECTOR, f"a[href*='/app/ams/mawbMenu.do?amsMawbId=']"))
         )
 
-        # Check if there is more than one search result
+        # If there are multiple search results, click the last one
         if len(search_results) > 1:
-            screenshot_path = save_screenshot(driver, "multiple_search_results_error.png", dir_path)
+            print(f"Multiple search results found: {len(search_results)}. Clicking on the last one.")
+            search_results[-1].click()  # Click on the last search result
+        elif len(search_results) == 1:
+            print("Only one search result found. Clicking on it.")
+            search_results[0].click()  # Click the only search result
+        else:
+            # If no search results are found, return an error
+            screenshot_path = save_screenshot(driver, "no_search_results_error.png", dir_path)
             return {
-                "message": "error: multiple search results found, unable to proceed",
+                "message": "error: no search results found, unable to proceed",
                 "screenshot": screenshot_path
             }
-
-        # Click the only search result if it's the correct one
-        search_results[0].click()
 
     except TimeoutException:
         screenshot_path = save_screenshot(driver, "search_results_timeout_error.png", dir_path)
@@ -337,6 +336,7 @@ def check_admissible(excel_filename, dir_path):
         )
         if "ADMISSIBLE" in admissible_text.text:
             screenshot_path = save_screenshot(driver, "admissible_success.png", dir_path)
+            processed_set.add(excel_filename)
             return {"message": "success: entry is admissible", "screenshot": screenshot_path}
         else:
             screenshot_path = save_screenshot(driver, "not_admissible_error.png", dir_path)
@@ -348,45 +348,46 @@ def check_admissible(excel_filename, dir_path):
 
 
 # Function to handle browser automation with Selenium
-def perform_browser_operations(excel_filename, file_path):
+def perform_browser_operations(excel_filename, file_path, record_id, current_checklist):
     driver = webdriver.Chrome()
     driver.maximize_window()
 
     try:
         # Check if the directory for the excel file already exists
-        result = create_directory_for_excel(excel_filename, driver)
-        if result['message'] == 'error: Already been pushed before':
-            print(f"Error: {result['message']}, Screenshot saved at: {result['screenshot']}")
-            return result  # Return early if directory already exists
+        result_excel = create_directory_for_excel(excel_filename, driver)
+        if result_excel['message'] == 'error: Already been pushed before':
+            if (excel_filename, record_id) not in current_checklist:
+                current_checklist.append((excel_filename, record_id))
+        else:
 
-        # If directory is created successfully, continue with further operations
-        dir_path = result['dir_path']
+            # If directory is created successfully, continue with further operations
+            dir_path = result_excel['dir_path']
 
-        login(driver)
-        navigate_to_upload_page(driver)
-        upload_excel(driver, file_path)
+            login(driver)
+            navigate_to_upload_page(driver)
+            upload_excel(driver, file_path)
 
-        result_upload = wait_for_upload_and_click_link(driver, excel_filename, dir_path)
-        if result_upload['message'].startswith("error"):
-            return result_upload
+            result_upload = wait_for_upload_and_click_link(driver, excel_filename, dir_path)
+            if result_upload['message'].startswith("error"):
+                return result_upload
 
-        result_edit = edit_mawb_if_needed(driver, excel_filename, dir_path)
-        if result_edit['message'].startswith("error"):
-            return result_edit
+            result_edit = edit_mawb_if_needed(driver, excel_filename, dir_path)
+            if result_edit['message'].startswith("error"):
+                return result_edit
 
-        result_ams = transmit_ams_acas(driver, dir_path)
-        if result_ams['message'].startswith("error"):
-            return result_ams
+            result_ams = transmit_ams_acas(driver, dir_path)
+            if result_ams['message'].startswith("error"):
+                return result_ams
 
-        result_responses = check_responses(driver, dir_path)
-        if result_responses['message'].startswith("error"):
-            return result_responses
+            result_responses = check_responses(driver, dir_path)
+            if result_responses['message'].startswith("error"):
+                return result_responses
 
-        result_create = create_type_86_entry(driver, dir_path)
-        if result_create['message'].startswith("error"):
-            return result_create
+            result_create = create_type_86_entry(driver, dir_path)
+            if result_create['message'].startswith("error"):
+                return result_create
 
-        return {"message": "success", "screenshot": None}
+            return {"message": "success", "screenshot": None}
 
     finally:
         # Ensure driver is always quit after operations
@@ -412,7 +413,7 @@ def upload_screenshot_to_s3(file_path):
     sign = hashlib.md5(sign_string.encode('utf-8')).hexdigest()
     sign_16 = sign[8:24]
 
-    # Prepare the request payload
+    # Prepare the request payloadt
     payload = {
         "appKey": app_key,
         "file": file_data,
@@ -462,22 +463,36 @@ def return_results_to_api(api_url, record_id, excel_filename, result_message, sc
         print("Failed to send results. HTTP Status:", response.status_code)
         return False
 
+# Initialize a lock
+checklist_lock = Lock()
 
-# Periodic checklist task
-def periodic_check(previous_checklist, processed_set, return_api_url):
+def periodic_check(current_checklist, return_api_url, processed_set):
     while True:
         current_time = datetime.now()
-        if current_time.minute == 0:  # Execute at the specified minute
-            print("Checking the previous hour's checklist...")
-            for _ in range(len(previous_checklist)):
-                excel_filename = previous_checklist.pop(0)
-                print(excel_filename)
+        if current_time.minute == 52:  # Execute at the specified time, e.g., every hour at 0 minutes
+            print("Processing the current checklist...")
+
+            for _ in range(len(current_checklist)):
+                with checklist_lock:  # Acquire lock before modifying shared resources
+                    if not current_checklist:
+                        break  # Exit if the checklist is empty, although in this case it will not happen
+                    excel_filename, record_id = current_checklist.pop(0)  # Pop the first item safely
+
+                # Process the popped item outside the lock to minimize lock contention
+                print(excel_filename, record_id)
                 dir_path = os.path.join(os.getcwd(), excel_filename)
-                result = check_admissible(excel_filename, dir_path)
-                return_results_to_api(return_api_url, None, excel_filename, result['message'],
+                result = check_admissible(excel_filename, dir_path, processed_set)
+                return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
                                       result['screenshot'])
-            print("Checklist check complete!")
-        time.sleep(60)  # Check every minute
+
+            print("Checklist processing complete!")
+
+        time.sleep(60)  # Wait for 60 seconds before checking again
+
+
+def add_to_current_checklist(current_checklist, new_entry):
+    with checklist_lock:  # Acquire lock before modifying shared resources
+        current_checklist.append(new_entry)  # Safely add new entries
 
 
 # Main process
@@ -502,13 +517,11 @@ def main_process(current_checklist, processed_set, api_url, return_api_url):
                         try:
                             print(f"Processing data for MAWB No: {excel_filename}...")
                             file_path = download_excel(actual_download_url, excel_filename)
-                            # dir_path = create_directory_for_excel(excel_filename)
-                            result = perform_browser_operations(excel_filename, file_path)
-                            processed_set.add(excel_filename)
+                            result = perform_browser_operations(excel_filename, file_path, record_id, current_checklist)
                             return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
                                                   result['screenshot'])
                             if not result['message'].startswith("error"):
-                                current_checklist.append(excel_filename)
+                                current_checklist.append((excel_filename, record_id))
                         except Exception as e:
                             print(f"An error occurred: {e}")
                 else:
@@ -521,16 +534,15 @@ def main_process(current_checklist, processed_set, api_url, return_api_url):
 
 # Main function to run both tasks concurrently and manage checklist switching
 def main():
-    api_url = "http://139.224.207.21:8085/t86CustomsClearanceNetchb/queryList"
-    return_api_url = "http://139.224.207.21:8085/t86CustomsClearanceNetchb/netchbConfrim"
+    api_url = "https://us-cbsapi.tolead.com/t86CustomsClearanceNetchb/queryList"
+    return_api_url = "https://us-cbsapi.tolead.com/t86CustomsClearanceNetchb/netchbConfrim"
 
     current_checklist = []  # Checklist for the current hour
-    previous_checklist = []  # Checklist for the previous hour
     processed_set = set()  # Set to track processed or in-progress master numbers
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         executor.submit(main_process, current_checklist, processed_set, api_url, return_api_url)
-        executor.submit(periodic_check, previous_checklist, processed_set, return_api_url)
+        executor.submit(periodic_check, current_checklist, return_api_url, processed_set)
 
 if __name__ == "__main__":
     main()
