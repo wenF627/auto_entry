@@ -349,16 +349,20 @@ def check_admissible(excel_filename, dir_path, processed_set):
 
     # 检查是否显示ADMISSIBLE
     try:
-        admissible_text = WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//pre[contains(text(),'ADMISSIBLE')]"))
+        admissible_or_released_text = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//pre[contains(text(),'ADMISSIBLE') or contains(text(),'RELEASED')]"))
         )
-        if "ADMISSIBLE" in admissible_text.text:
-            screenshot_path = save_screenshot(driver, "admissible_success.png", dir_path)
+
+        # Check if "ADMISSIBLE" or "RELEASED" is present in the found element's text
+        if "ADMISSIBLE" in admissible_or_released_text.text or "RELEASED" in admissible_or_released_text.text:
+            screenshot_path = save_screenshot(driver, "admissible_or_released_success.png", dir_path)
             processed_set.add(excel_filename)
-            return {"message": "success: entry is admissible", "screenshot": screenshot_path}
+            return {"message": "success: entry is admissible or released", "screenshot": screenshot_path}
         else:
-            screenshot_path = save_screenshot(driver, "not_admissible_error.png", dir_path)
-            return {"message": "error: not admissible", "screenshot": screenshot_path}
+            screenshot_path = save_screenshot(driver, "not_admissible_or_released_error.png", dir_path)
+            return {"message": "error: not admissible or released", "screenshot": screenshot_path}
+
     except TimeoutException:
         screenshot_path = save_screenshot(driver, "timeout_error_admissible_check.png", dir_path)
         return {"message": "error: timeout waiting for admissible text",
@@ -369,11 +373,7 @@ def check_admissible(excel_filename, dir_path, processed_set):
 def perform_browser_operations(excel_filename, file_path, record_id, current_checklist):
     result_excel = create_directory_for_excel(excel_filename)
     if result_excel['message'] == 'error: Already been pushed before':
-        if (excel_filename, record_id) not in current_checklist:
-            current_checklist.append((excel_filename, record_id))
-            return {"message": "Added to list", "screenshot": None}
-        else:
-            return {"message": "Already in list", "screenshot": None}
+        return {"message": "Check for admissible", "screenshot": None}
     else:
         dir_path = result_excel['dir_path']
         driver = webdriver.Chrome()
@@ -404,7 +404,7 @@ def perform_browser_operations(excel_filename, file_path, record_id, current_che
             if result_create['message'].startswith("error"):
                 return result_create
 
-            return {"message": "success", "screenshot": None}
+            return {"message": "success", "screenshot": result_create['screenshot']}
 
         finally:
             # Ensure driver is always quit after operations
@@ -486,7 +486,7 @@ checklist_lock = Lock()
 def periodic_check(current_checklist, return_api_url, processed_set):
     while True:
         current_time = datetime.now()
-        if current_time.minute == 57:  # Execute at the specified time, e.g., every hour at 0 minutes
+        if current_time.minute % 30 == 0:  # Execute at the specified time, e.g., every hour at 0 minutes
             print("Processing the current checklist...")
 
             for _ in range(len(current_checklist)):
@@ -535,10 +535,13 @@ def main_process(current_checklist, processed_set, api_url, return_api_url):
                             print(f"Processing data for MAWB No: {excel_filename}...")
                             file_path = download_excel(actual_download_url, excel_filename)
                             result = perform_browser_operations(excel_filename, file_path, record_id, current_checklist)
-                            return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
+                            if result['message'].startswith("error"):
+                                return_results_to_api(return_api_url, record_id, excel_filename, result['message'],
                                                   result['screenshot'])
-                            if not result['message'].startswith("error"):
-                                current_checklist.append((excel_filename, record_id))
+                            else:
+                                if (excel_filename, record_id) not in current_checklist:
+                                    current_checklist.append((excel_filename, record_id))
+                                print(current_checklist)
                         except Exception as e:
                             print(f"An error occurred: {e}")
                 else:
