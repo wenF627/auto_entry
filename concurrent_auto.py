@@ -288,7 +288,7 @@ def create_type_86_entry(driver, dir_path):
     except TimeoutException:
         screenshot_path = save_screenshot(driver, "timeout_error_screenshot.png", dir_path)
         return {"message": "error: success message not found",
-                "screenshot": screenshot_path} ;
+                "screenshot": screenshot_path}
 
 
 def check_admissible(excel_filename, dir_path, processed_set):
@@ -486,7 +486,7 @@ checklist_lock = Lock()
 def periodic_check(current_checklist, return_api_url, processed_set):
     while True:
         current_time = datetime.now()
-        if current_time.minute % 30 == 0:  # Execute at the specified time, e.g., every hour at 0 minutes
+        if current_time.minute == 57:  # Execute at the specified time, e.g., every hour at 0 minutes
             print("Processing the current checklist...")
 
             for _ in range(len(current_checklist)):
